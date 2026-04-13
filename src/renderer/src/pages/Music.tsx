@@ -1,238 +1,399 @@
-import Navbar from "../components/Navbar";
-import "./Music.css";
-import {useState, useEffect, useRef} from 'react';
-import axios from "axios";
-import { motion } from "motion/react";
+import './Music.css'
+import { useState, useEffect, useRef } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import axios from 'axios'
 
 interface Song {
-    id: string;
-    title: string;
-    artist: string;
-    audioUrl: string;
+  id: string
+  title: string
+  artist: string
+  src: string
 }
 
-function Music() {
-    const [songs, setSongs] = useState<Song[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [currentSong, setCurrentSong] = useState<Song | null>(null);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
-    const [volume, setVolume] = useState(1);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
-    const [IP, setIP] = useState('');
+type SourceMode = 'api' | 'local'
 
-    useEffect(() => {
-        if (!IP) return;
+function Music(): React.JSX.Element {
+  const [mode, setMode] = useState<SourceMode>('api')
+  const [apiUrl, setApiUrl] = useState('')
+  const [apiInput, setApiInput] = useState('')
+  const [folderName, setFolderName] = useState('')
+  const [songs, setSongs] = useState<Song[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [currentSong, setCurrentSong] = useState<Song | null>(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [volume, setVolume] = useState(0.8)
+  const [shuffle, setShuffle] = useState(false)
+  const [repeat, setRepeat] = useState(false)
+  const [durations, setDurations] = useState<Record<string, number>>({})
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
-        setLoading(true);
-        axios.get(IP)
-            .then(response => {
-                setSongs(response.data);
-                setLoading(false);
-            })
-            .catch(error => {
-                console.error("error", error);
-                setLoading(false);
-            });
-    }, [IP]);
+  // Sync volume
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume
+  }, [volume])
 
-    useEffect(() => {
-        if (audioRef.current) {
-            audioRef.current.volume = volume;
-        }
-    }, [volume]);
+  // Play/pause on state change
+  useEffect(() => {
+    if (!audioRef.current) return
+    if (isPlaying) {
+      audioRef.current.play().catch(console.error)
+    } else {
+      audioRef.current.pause()
+    }
+  }, [isPlaying, currentSong])
 
-    useEffect(() => {
-        if (audioRef.current) {
-            if (isPlaying) {
-                audioRef.current.play();
-            } else {
-                audioRef.current.pause();
-            }
-        }
-    }, [isPlaying, currentSong]);
+  const connectApi = async (): Promise<void> => {
+    const url = apiInput.trim()
+    if (!url) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await axios.get(url)
+      const raw: { id?: string; title?: string; artist?: string; audioUrl?: string }[] = res.data
+      const mapped: Song[] = raw.map((s, i) => ({
+        id: s.id ?? String(i),
+        title: s.title ?? `Track ${i + 1}`,
+        artist: s.artist ?? 'Unknown Artist',
+        src: s.audioUrl ?? ''
+      }))
+      setSongs(mapped)
+      setApiUrl(url)
+      setMode('api')
+      setCurrentSong(null)
+      setIsPlaying(false)
+    } catch {
+      setError('Could not connect. Check the URL and that your server is running.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
-    const handleSongSelect = (song: Song) => {
-        if (currentSong?.id === song.id) {
-            setIsPlaying(!isPlaying);
-        } else {
-            setCurrentSong(song);
-            setIsPlaying(true);
-        }
-    };
+  const openLocalFolder = async (): Promise<void> => {
+    const folderPath = await window.api.openFolder()
+    if (!folderPath) return
+    setLoading(true)
+    setError('')
+    const parts = folderPath.replace(/\\/g, '/').split('/')
+    setFolderName(parts[parts.length - 1])
+    const files = await window.api.getMusicFiles(folderPath)
+    const mapped: Song[] = files.map((f) => ({
+      id: f.id,
+      title: f.title,
+      artist: f.artist,
+      src: toFileUrl(f.path)
+    }))
+    setSongs(mapped)
+    setMode('local')
+    setCurrentSong(null)
+    setIsPlaying(false)
+    setDurations({})
+    setLoading(false)
+  }
 
-    const handleTimeUpdate = () => {
-        if (audioRef.current) {
-            setCurrentTime(audioRef.current.currentTime);
-            setDuration(audioRef.current.duration);
-        }
-    };
+  const toFileUrl = (path: string): string => {
+    const p = path.replace(/\\/g, '/')
+    return p.startsWith('/') ? `file://${p}` : `file:///${p}`
+  }
 
-    const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const newTime = parseFloat(e.target.value);
-        if (audioRef.current) {
-            audioRef.current.currentTime = newTime;
-            setCurrentTime(newTime);
-        }
-    };
+  const handleSongSelect = (song: Song): void => {
+    if (currentSong?.id === song.id) {
+      setIsPlaying(!isPlaying)
+    } else {
+      setCurrentSong(song)
+      setIsPlaying(true)
+      setCurrentTime(0)
+    }
+  }
 
-    const formatTime = (seconds: number) => {
-        if (isNaN(seconds)) return "0:00";
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
+  const handleTimeUpdate = (): void => {
+    if (!audioRef.current) return
+    setCurrentTime(audioRef.current.currentTime)
+    const d = audioRef.current.duration
+    if (!isNaN(d) && d > 0) {
+      setDuration(d)
+      if (currentSong) setDurations((p) => ({ ...p, [currentSong.id]: d }))
+    }
+  }
 
-    const handlePrevious = () => {
-        if (!currentSong) return;
-        const currentIndex = songs.findIndex(s => s.id === currentSong.id);
-        const prevIndex = currentIndex > 0 ? currentIndex - 1 : songs.length - 1;
-        setCurrentSong(songs[prevIndex]);
-        setIsPlaying(true);
-    };
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const t = parseFloat(e.target.value)
+    if (audioRef.current) {
+      audioRef.current.currentTime = t
+      setCurrentTime(t)
+    }
+  }
 
-    const handleNext = () => {
-        if (!currentSong) return;
-        const currentIndex = songs.findIndex(s => s.id === currentSong.id);
-        const nextIndex = currentIndex < songs.length - 1 ? currentIndex + 1 : 0;
-        setCurrentSong(songs[nextIndex]);
-        setIsPlaying(true);
-    };
+  const fmt = (s: number): string => {
+    if (!s || isNaN(s)) return '--:--'
+    return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+  }
 
-    return (
-        <>
-            <Navbar />
-            <div className="music-container">
-                <div className="music-content">
-                    <motion.div
-                        initial={{ opacity: 0, y: -20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.6 }}
-                        className="music-header"
-                    >
-                      <label htmlFor="api-input">API input</label>
-                                 <input 
-  type="text" 
-  value={IP} 
-  onChange={e => setIP(e.target.value)}
-  onPaste={e => setIP(e.clipboardData.getData('text'))}
-/>
-                    
-                    </motion.div>
+  const handlePrev = (): void => {
+    if (!currentSong) return
+    const i = songs.findIndex((s) => s.id === currentSong.id)
+    setCurrentSong(songs[i > 0 ? i - 1 : songs.length - 1])
+    setIsPlaying(true)
+    setCurrentTime(0)
+  }
 
-                    {loading ? (
-                        <div className="loading-container">
-                            <div className="spinner"></div>
-                            <p>Loading songs...</p>
-                        </div>
-                    ) : songs.length === 0 ? (
-                        <div className="empty-state">
-                            <p>No songs available</p>
-                        </div>
-                    ) : (
-                        <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ duration: 0.6, delay: 0.2 }}
-                            className="songs-grid"
-                        >
-                            {songs.map((song, index) => (
-                                <motion.div
-                                    key={song.id}
-                                    initial={{ opacity: 0, y: 20 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    transition={{ duration: 0.4, delay: index * 0.1 }}
-                                    className={`song-card ${currentSong?.id === song.id ? 'active' : ''}`}
-                                    onClick={() => handleSongSelect(song)}
-                                >
-                                    <div className="song-card-content">
-                                        <div className="song-icon">
-                                            {currentSong?.id === song.id && isPlaying ? (
-                                                <span className="playing-icon">🎵</span>
-                                            ) : (
-                                                <span className="play-icon">▶</span>
-                                            )}
-                                        </div>
-                                        <div className="song-info">
-                                            <h3>{song.title}</h3>
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            ))}
-                        </motion.div>
-                    )}
+  const handleNext = (): void => {
+    if (!currentSong) return
+    if (repeat && audioRef.current) {
+      audioRef.current.currentTime = 0
+      audioRef.current.play().catch(console.error)
+      return
+    }
+    const i = songs.findIndex((s) => s.id === currentSong.id)
+    const next = shuffle
+      ? Math.floor(Math.random() * songs.length)
+      : i < songs.length - 1 ? i + 1 : 0
+    setCurrentSong(songs[next])
+    setIsPlaying(true)
+    setCurrentTime(0)
+  }
 
-                    {currentSong && (
-                        <motion.div
-                            initial={{ opacity: 0, y: 50 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.5 }}
-                            className="music-player"
-                        >
-                            <audio
-                                ref={audioRef}
-                                src={currentSong.audioUrl}
-                                onTimeUpdate={handleTimeUpdate}
-                                onLoadedMetadata={handleTimeUpdate}
-                                onEnded={handleNext}
-                            />
-                            
-                            <div className="player-info">
-                                <div className="current-song-info">
-                                    <h3>{currentSong.title}</h3>
-                                    
-                                </div>
-                            </div>
+  const progress = duration > 0 ? (currentTime / duration) * 100 : 0
+  const initial = (name: string): string => name.trim().charAt(0).toUpperCase() || '♪'
 
-                            <div className="player-controls">
-                                <button className="control-btn" onClick={handlePrevious} title="Previous">
-                                    ⏮
-                                </button>
-                                <button 
-                                    className="control-btn play-pause" 
-                                    onClick={() => setIsPlaying(!isPlaying)}
-                                    title={isPlaying ? "Pause" : "Play"}
-                                >
-                                    {isPlaying ? "⏸" : "▶"}
-                                </button>
-                                <button className="control-btn" onClick={handleNext} title="Next">
-                                    ⏭
-                                </button>
-                            </div>
+  const sourceLabel = mode === 'api'
+    ? (apiUrl ? new URL(apiUrl).host : '')
+    : folderName
 
-                            <div className="player-progress">
-                                <span className="time">{formatTime(currentTime)}</span>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max={duration || 0}
-                                    value={currentTime}
-                                    onChange={handleSeek}
-                                    className="progress-bar"
-                                />
-                                <span className="time">{formatTime(duration)}</span>
-                            </div>
+  return (
+    <div className="ml-layout">
 
-                            <div className="player-volume">
-                                <span>🔊</span>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="1"
-                                    step="0.01"
-                                    value={volume}
-                                    onChange={(e) => setVolume(parseFloat(e.target.value))}
-                                    className="volume-bar"
-                                />
-                                <span>{Math.round(volume * 100)}%</span>
-                            </div>
-                        </motion.div>
-                    )}
-                </div>
+      {/* ── SIDEBAR ── */}
+      <aside className="ml-sidebar">
+
+        {/* Source switcher */}
+        <div className="ml-source-panel">
+          <div className="ml-tabs">
+            <button
+              className={`ml-tab ${mode === 'api' ? 'ml-tab--on' : ''}`}
+              onClick={() => setMode('api')}
+            >
+              Network
+            </button>
+            <button
+              className={`ml-tab ${mode === 'local' ? 'ml-tab--on' : ''}`}
+              onClick={() => setMode('local')}
+            >
+              Local
+            </button>
+          </div>
+
+          {mode === 'api' ? (
+            <div className="ml-api-form">
+              <input
+                className="ml-api-input"
+                type="text"
+                placeholder="http://192.168.x.x:PORT/songs"
+                value={apiInput}
+                onChange={(e) => setApiInput(e.target.value)}
+                onPaste={(e) => setApiInput(e.clipboardData.getData('text'))}
+                onKeyDown={(e) => e.key === 'Enter' && connectApi()}
+              />
+              <button
+                className="ml-connect-btn"
+                onClick={connectApi}
+                disabled={loading}
+              >
+                {loading ? '…' : 'Connect'}
+              </button>
+              {error && <p className="ml-error">{error}</p>}
             </div>
-        </>
-    );
+          ) : (
+            <button className="ml-local-btn" onClick={openLocalFolder}>
+              Browse folder
+            </button>
+          )}
+        </div>
+
+        {/* Now playing */}
+        <div className="ml-nowplaying">
+          <AnimatePresence mode="wait">
+            {currentSong ? (
+              <motion.div
+                key={currentSong.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                transition={{ duration: 0.25 }}
+                className="ml-np"
+              >
+                <div className={`ml-np-art ${isPlaying ? 'ml-np-art--pulse' : ''}`}>
+                  <span>{initial(currentSong.title)}</span>
+                </div>
+                <p className="ml-np-title">{currentSong.title}</p>
+                <p className="ml-np-artist">{currentSong.artist}</p>
+                {isPlaying && (
+                  <div className="ml-bars">
+                    {[1,2,3,4].map((i) => (
+                      <div key={i} className="ml-bar" style={{ animationDelay: `${i * 0.15}s` }} />
+                    ))}
+                  </div>
+                )}
+              </motion.div>
+            ) : (
+              <motion.div
+                key="idle"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="ml-np ml-np--idle"
+              >
+                <div className="ml-np-art ml-np-art--empty">
+                  <span>♪</span>
+                </div>
+                <p className="ml-np-hint">Nothing playing</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+      </aside>
+
+      {/* ── MAIN ── */}
+      <main className="ml-main">
+        <div className="ml-header">
+          <div>
+            <h1 className="ml-title">
+              {sourceLabel || 'Library'}
+            </h1>
+            {songs.length > 0 && (
+              <span className="ml-count">{songs.length} tracks</span>
+            )}
+          </div>
+        </div>
+
+        <AnimatePresence mode="wait">
+          {loading ? (
+            <motion.div key="loading" className="ml-state" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <div className="ml-spinner" />
+            </motion.div>
+          ) : songs.length === 0 ? (
+            <motion.div key="empty" className="ml-state" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <p className="ml-state-text">
+                {mode === 'api'
+                  ? 'Enter your server URL and hit Connect'
+                  : 'Select a folder to load tracks'}
+              </p>
+            </motion.div>
+          ) : (
+            <motion.div key="list" className="ml-list-wrap" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <div className="ml-list-head">
+                <span className="ml-lh ml-lh--num">#</span>
+                <span className="ml-lh">Title</span>
+                <span className="ml-lh">Artist</span>
+                <span className="ml-lh ml-lh--dur">Duration</span>
+              </div>
+              <div className="ml-list">
+                {songs.map((song, idx) => {
+                  const active = currentSong?.id === song.id
+                  const playing = active && isPlaying
+                  return (
+                    <motion.div
+                      key={song.id}
+                      className={`ml-row ${active ? 'ml-row--active' : ''}`}
+                      onClick={() => handleSongSelect(song)}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: 0.15, delay: Math.min(idx * 0.02, 0.5) }}
+                    >
+                      <span className="ml-row-num">
+                        {playing
+                          ? <span className="ml-dot" />
+                          : idx + 1}
+                      </span>
+                      <span className="ml-row-title">{song.title}</span>
+                      <span className="ml-row-artist">{song.artist}</span>
+                      <span className="ml-row-dur">
+                        {durations[song.id] ? fmt(durations[song.id]) : '--:--'}
+                      </span>
+                    </motion.div>
+                  )
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      {/* ── PLAYER ── */}
+      <AnimatePresence>
+        {currentSong && (
+          <motion.footer
+            className="ml-player"
+            initial={{ y: 90 }}
+            animate={{ y: 0 }}
+            exit={{ y: 90 }}
+            transition={{ type: 'spring', stiffness: 280, damping: 28 }}
+          >
+            <audio
+              ref={audioRef}
+              src={currentSong.src}
+              onTimeUpdate={handleTimeUpdate}
+              onLoadedMetadata={handleTimeUpdate}
+              onEnded={handleNext}
+            />
+
+            <div className="ml-player-info">
+              <div className="ml-player-art">{initial(currentSong.title)}</div>
+              <div className="ml-player-meta">
+                <p className="ml-player-song">{currentSong.title}</p>
+                <p className="ml-player-artist">{currentSong.artist}</p>
+              </div>
+            </div>
+
+            <div className="ml-player-center">
+              <div className="ml-controls">
+                <button className={`ml-ctrl ${shuffle ? 'ml-ctrl--on' : ''}`} onClick={() => setShuffle(!shuffle)} title="Shuffle">⇄</button>
+                <button className="ml-ctrl" onClick={handlePrev} title="Previous">⏮</button>
+                <button className="ml-ctrl ml-ctrl--play" onClick={() => setIsPlaying(!isPlaying)}>
+                  {isPlaying ? '⏸' : '▶'}
+                </button>
+                <button className="ml-ctrl" onClick={handleNext} title="Next">⏭</button>
+                <button className={`ml-ctrl ${repeat ? 'ml-ctrl--on' : ''}`} onClick={() => setRepeat(!repeat)} title="Repeat">↻</button>
+              </div>
+              <div className="ml-progress">
+                <span className="ml-time">{fmt(currentTime)}</span>
+                <div className="ml-bar-track">
+                  <div className="ml-bar-fill" style={{ width: `${progress}%` }} />
+                  <input
+                    type="range"
+                    className="ml-seek"
+                    min={0}
+                    max={duration || 0}
+                    step={0.1}
+                    value={currentTime}
+                    onChange={handleSeek}
+                  />
+                </div>
+                <span className="ml-time">{fmt(duration)}</span>
+              </div>
+            </div>
+
+            <div className="ml-vol">
+              <span className="ml-vol-icon">🔊</span>
+              <div className="ml-vol-track">
+                <div className="ml-vol-fill" style={{ width: `${volume * 100}%` }} />
+                <input
+                  type="range"
+                  className="ml-seek"
+                  min={0} max={1} step={0.01}
+                  value={volume}
+                  onChange={(e) => setVolume(parseFloat(e.target.value))}
+                />
+              </div>
+              <span className="ml-vol-pct">{Math.round(volume * 100)}</span>
+            </div>
+          </motion.footer>
+        )}
+      </AnimatePresence>
+    </div>
+  )
 }
 
-export default Music;
+export default Music
